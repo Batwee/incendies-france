@@ -15,7 +15,6 @@ from streamlit_autorefresh import st_autorefresh
 # ==========================================
 st.set_page_config(page_title="Suivi Satellite des Incendies (France & Espagne)", page_icon="🔥", layout="wide")
 
-# Zone géographique (France + Espagne + Portugal)
 REGION_BBOX = {"lat_min": 35.0, "lat_max": 51.5, "lon_min": -10.0, "lon_max": 10.0}
 
 CACHE_DIR = "cache_data"
@@ -30,20 +29,19 @@ def is_cache_valid(filepath, max_age_seconds):
 # ==========================================
 # CLASSIFICATION SELON L'ANCIENNETÉ
 # ==========================================
-def get_recency_info(dt):
-    now = datetime.datetime.utcnow()
+def get_recency_info(dt, now):
     hours_ago = (now - dt).total_seconds() / 3600.0
 
     if hours_ago <= 12:
-        return "#8B0000", "< 12h", "Moins de 12 heures"    # Rouge très foncé
+        return "#8B0000", "< 12h", "Moins de 12 heures", True
     elif hours_ago <= 24:
-        return "#FF0000", "< 24h", "12h à 24h"           # Rouge vif
+        return "#FF0000", "< 24h", "12h à 24h", True
     elif hours_ago <= 48:
-        return "#FF7F00", "< 48h", "24h à 48h"           # Orange
+        return "#FF7F00", "< 48h", "24h à 48h", True
     elif hours_ago <= 72:
-        return "#FFB84D", "< 72h", "48h à 72h"           # Orange clair
+        return "#FFB84D", "< 72h", "48h à 72h", True
     else:
-        return "#FFE082", "> 72h", "Plus de 72h"         # Jaune clair
+        return "#FFE082", "> 72h", "Plus de 72h", False  # Marqué comme ancien
 
 # ==========================================
 # RÉCUPÉRATION DE TOUTES LES SOURCES SATELLITES (NASA FIRMS)
@@ -107,36 +105,34 @@ def fetch_all_fires_data():
 def main():
     st.title("🔥 Détection des Foyers par Satellite (France & Espagne)")
     
-    # Rafraîchissement automatique toutes les 5 min
     st_autorefresh(interval=5 * 60 * 1000, key="datarefresh")
     
     df_fires = fetch_all_fires_data()
+    now_utc = datetime.datetime.utcnow()
 
-    # Indicateurs
+    # Indicateurs d'en-tête
     col1, col2 = st.columns(2)
     col1.metric("🔥 Total foyers détectés (7 jours)", len(df_fires) if not df_fires.empty else 0)
     col2.metric("⏱️ Dernière actualisation", datetime.datetime.now().strftime("%H:%M:%S"))
 
-    # LÉGENDE AU-DESSUS DE LA CARTE
+    # LÉGENDE CORRIGÉE (TEXTE BLANC SUR FOND SOMBRE RENDERÉ PROPREMENT)
     st.markdown("""
-    <div style="background-color: #1e1e1e; padding: 12px; border-radius: 8px; margin-bottom: 12px; border: 1px solid #333;">
-        <span style="font-weight: bold; margin-right: 15px; color: #fff;">🎨 Récence des détections :</span>
-        <span style="margin-right: 15px; font-size: 14px;"><span style="color:#8B0000;">🟤</span> <b>&lt; 12h</b></span>
-        <span style="margin-right: 15px; font-size: 14px;"><span style="color:#FF0000;">🔴</span> <b>12h à 24h</b></span>
-        <span style="margin-right: 15px; font-size: 14px;"><span style="color:#FF7F00;">🟠</span> <b>24h à 48h</b></span>
-        <span style="margin-right: 15px; font-size: 14px;"><span style="color:#FFB84D;">🟡</span> <b>48h à 72h</b></span>
-        <span style="margin-right: 15px; font-size: 14px;"><span style="color:#FFE082;">⚪</span> <b>&gt; 72h</b></span>
+    <div style="background-color: #262730; padding: 12px; border-radius: 8px; margin-bottom: 12px; border: 1px solid #444; color: #FFFFFF;">
+        <span style="font-weight: bold; margin-right: 15px; color: #FFFFFF;">🎨 Récence des détections :</span>
+        <span style="margin-right: 15px; font-size: 14px; color: #FFFFFF;"><span style="color:#8B0000;">🟤</span> <b style="color: #FFFFFF;">&lt; 12h</b></span>
+        <span style="margin-right: 15px; font-size: 14px; color: #FFFFFF;"><span style="color:#FF0000;">🔴</span> <b style="color: #FFFFFF;">12h à 24h</b></span>
+        <span style="margin-right: 15px; font-size: 14px; color: #FFFFFF;"><span style="color:#FF7F00;">🟠</span> <b style="color: #FFFFFF;">24h à 48h</b></span>
+        <span style="margin-right: 15px; font-size: 14px; color: #FFFFFF;"><span style="color:#FFB84D;">🟡</span> <b style="color: #FFFFFF;">48h à 72h</b></span>
+        <span style="margin-right: 15px; font-size: 14px; color: #FFFFFF;"><span style="color:#FFE082;">⚪</span> <b style="color: #FFFFFF;">&gt; 72h (Zone diffuse)</b></span>
     </div>
     """, unsafe_allow_html=True)
 
-    # Récupération du niveau de zoom en session
     current_zoom = st.session_state.get("last_zoom", 5)
     current_bounds = st.session_state.get("last_bounds", None)
 
-    # Initialisation de la carte (Centrée sur les Pyrénées)
+    # Carte centrée sur les Pyrénées
     m = folium.Map(location=[43.0, 1.5], zoom_start=current_zoom, tiles=None)
 
-    # FONDS DE CARTE (Seuls éléments sélectionnables dans le menu)
     folium.TileLayer(
         tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
         attr="Esri World Imagery",
@@ -157,28 +153,30 @@ def main():
         overlay=False
     ).add_to(m)
 
-    # GESTION DYNAMIQUE DE L'AFFICHAGE SELON LE ZOOM
-    ZOOM_THRESHOLD = 8  # Niveau de zoom pour basculer en vue départementale
+    # SEUIL DE ZOOM ÉLEVÉ POUR ÉVITER TOUT PLANTAGE (Niveau local / commune)
+    ZOOM_THRESHOLD = 10 
 
     if not df_fires.empty:
         if current_zoom < ZOOM_THRESHOLD:
-            # VUE GLOBALE (ZOOM < 8) : DENSITÉ SEULE (Directement sur la carte, non sélectionnable dans le menu)
-            st.info("🗺️ **Vue d'ensemble** : Affichage de la densité des foyers. Zoomez sur un département (zoom ≥ 8) pour afficher les points précis.")
+            # 1. VUE MACRO (< ZOOM 10) : Carte de densité globale
+            st.info("🗺️ **Vue d'ensemble** : Densité globale affichée. Zoomez fortement sur une zone précise (zoom ≥ 10) pour voir les foyers exacts.")
             
-            heat_data = [[row['latitude'], row['longitude'], 0.5] for _, row in df_fires.iterrows()]
+            # Échantillonnage léger pour garantir 60 FPS lors du pan/zoom
+            sample_df = df_fires if len(df_fires) < 10000 else df_fires.sample(10000, random_state=42)
+            heat_data = sample_df[['latitude', 'longitude']].values.tolist()
+            
             HeatMap(
                 heat_data,
-                radius=11,
-                blur=9,
-                min_opacity=0.3,
+                radius=10,
+                blur=8,
+                min_opacity=0.35,
                 gradient={0.2: '#FFE082', 0.5: '#FF7F00', 0.8: '#FF0000', 1.0: '#8B0000'}
             ).add_to(m)
 
         else:
-            # VUE DÉPARTEMENTALE/LOCALE (ZOOM >= 8) : POINTS PRÉCIS
-            st.success(f"📍 **Niveau de zoom actif ({current_zoom})** : Affichage des points précis.")
+            # 2. VUE ZOOMÉE (≥ ZOOM 10) : Extraction stricte de l'emprise visible
+            st.success(f"📍 **Zoom local ({current_zoom})** : Affichage des foyers actifs sur la zone visible.")
             
-            # Filtrage sur l'emprise visible de la carte pour garder 100% de fluidité
             df_visible = df_fires
             if current_bounds:
                 try:
@@ -191,34 +189,57 @@ def main():
                 except Exception:
                     df_visible = df_fires
 
-            for _, row in df_visible.iterrows():
-                color, label_age, age_desc = get_recency_info(row['datetime'])
+            if not df_visible.empty:
+                # Séparation des points : Récents (<=72h) vs Anciens (>72h)
+                hours_ago_series = (now_utc - df_visible['datetime']).dt.total_seconds() / 3600.0
                 
-                popup_html = f"""
-                <div style="font-family: Arial; font-size: 12px; min-width: 160px;">
-                    <b style="color:{color};">🔥 Foyer d'incendie ({label_age})</b><br><br>
-                    <b>Ancienneté :</b> {age_desc}<br>
-                    <b>Date UTC :</b> {row['datetime_str']}<br>
-                    <b>Coordonnées :</b> {row['latitude']:.4f}, {row['longitude']:.4f}
-                </div>
-                """
-                
-                folium.CircleMarker(
-                    location=[row['latitude'], row['longitude']],
-                    radius=3.5,
-                    color="#000000",
-                    weight=0.5,
-                    fill=True,
-                    fill_color=color,
-                    fill_opacity=0.95,
-                    popup=folium.Popup(popup_html, max_width=220),
-                    tooltip=f"Feu {label_age} ({row['datetime_str']})"
-                ).add_to(m)
+                df_recent = df_visible[hours_ago_series <= 72]
+                df_old = df_visible[hours_ago_series > 72]
 
-    # Sélecteur de fond de carte (uniquement les fonds satellite / relief / OSM)
+                # A) Les points de plus de 72h sont affichés sous forme de voile jaune (Heatmap très douce)
+                # Cela évite de créer des milliers de marqueurs individuels inutiles
+                if not df_old.empty:
+                    old_heat_data = df_old[['latitude', 'longitude']].values.tolist()
+                    HeatMap(
+                        old_heat_data,
+                        radius=15,
+                        blur=12,
+                        min_opacity=0.25,
+                        gradient={0.4: '#FFE082', 1.0: '#FFD54F'}
+                    ).add_to(m)
+
+                # B) Seuls les points récents (<= 72h) sont créés sous forme de CircleMarker
+                # On limite strictement à 500 marqueurs max pour prémunir tout plantage du navigateur
+                if len(df_recent) > 500:
+                    df_recent = df_recent.sort_values(by='datetime', ascending=False).head(500)
+
+                for _, row in df_recent.iterrows():
+                    color, label_age, age_desc, _ = get_recency_info(row['datetime'], now_utc)
+                    
+                    popup_html = f"""
+                    <div style="font-family: Arial; font-size: 12px; min-width: 150px;">
+                        <b style="color:{color};">🔥 Foyer ({label_age})</b><br><br>
+                        <b>Ancienneté :</b> {age_desc}<br>
+                        <b>Date UTC :</b> {row['datetime_str']}<br>
+                        <b>Coordonnées :</b> {row['latitude']:.4f}, {row['longitude']:.4f}
+                    </div>
+                    """
+                    
+                    folium.CircleMarker(
+                        location=[row['latitude'], row['longitude']],
+                        radius=4,
+                        color="#000000",
+                        weight=0.5,
+                        fill=True,
+                        fill_color=color,
+                        fill_opacity=0.9,
+                        popup=folium.Popup(popup_html, max_width=220),
+                        tooltip=f"Feu {label_age} ({row['datetime_str']})"
+                    ).add_to(m)
+
     folium.LayerControl(collapsed=False).add_to(m)
 
-    # Rendu Folium & capture des événements de zoom/déplacement
+    # Capture réactive du zoom et des limites
     map_output = st_folium(
         m, 
         width="100%", 
@@ -227,7 +248,6 @@ def main():
         returned_objects=["zoom", "bounds"]
     )
 
-    # Mise à jour réactive du niveau de zoom dans la session Streamlit
     if map_output and "zoom" in map_output and map_output["zoom"] is not None:
         new_zoom = map_output["zoom"]
         new_bounds = map_output.get("bounds")
