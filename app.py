@@ -100,12 +100,13 @@ def fetch_all_fires_data():
 def main():
     st.title("🔥 Détection des Foyers par Satellite (France & Espagne)")
     
+    # Rafraîchissement automatique toutes les 5 min
     st_autorefresh(interval=5 * 60 * 1000, key="datarefresh")
     
     df_fires = fetch_all_fires_data()
     now_utc = datetime.datetime.utcnow()
 
-    # En-tête
+    # Indicateurs d'en-tête
     col1, col2 = st.columns(2)
     col1.metric("🔥 Total foyers détectés (7 jours)", len(df_fires) if not df_fires.empty else 0)
     col2.metric("⏱️ Dernière actualisation", datetime.datetime.now().strftime("%H:%M:%S"))
@@ -122,24 +123,19 @@ def main():
     </div>
     """, unsafe_allow_html=True)
 
-    current_zoom = st.session_state.get("last_zoom", 5)
-
-    # Initialisation carte
-    m = folium.Map(location=[43.0, 1.5], zoom_start=current_zoom, tiles=None)
+    # Initialisation carte centrée sur la zone France-Espagne
+    m = folium.Map(location=[43.0, 1.5], zoom_start=5, tiles=None)
 
     # Fonds de carte
     folium.TileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", attr="Esri", name="🛰️ Satellite HD", overlay=False).add_to(m)
     folium.TileLayer("https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png", attr="OpenTopoMap", name="🌲 Relief & Végétation", overlay=False).add_to(m)
     folium.TileLayer("OpenStreetMap", name="🗺️ Carte Routière", overlay=False).add_to(m)
 
-    ZOOM_MIN_FOR_POINTS = 9
-
     if not df_fires.empty:
-        # 1. COUCHE HEATMAP (DENSITÉ) : Toujours activable/désactivable dans le menu
-        heat_group = folium.FeatureGroup(name="🔥 Heatmap (Densité globale)", show=True)
-        sample_heat = df_fires[['latitude', 'longitude']].values.tolist()
+        # 1. FILTRE 1 : HEATMAP (DENSITÉ) - COCHÉ PAR DÉFAUT (show=True)
+        heat_group = folium.FeatureGroup(name="🔥 Heatmap (Densité)", show=True)
         HeatMap(
-            sample_heat,
+            df_fires[['latitude', 'longitude']].values.tolist(),
             radius=10,
             blur=8,
             min_opacity=0.35,
@@ -147,74 +143,55 @@ def main():
         ).add_to(heat_group)
         heat_group.add_to(m)
 
-        # 2. COUCHE POINTS PRÉCIS (Séparation Récent / Ancien)
+        # 2. FILTRE 2 : RÉCENCE (Secteurs anciens jaunes + Points précis) - DÉCOCHÉ PAR DÉFAUT (show=False)
+        recency_group = folium.FeatureGroup(name="🎨 Récence (Points & zones par âge)", show=False)
+
         hours_ago_series = (now_utc - df_fires['datetime']).dt.total_seconds() / 3600.0
         df_recent = df_fires[hours_ago_series <= 72]
         df_old = df_fires[hours_ago_series > 72]
 
-        # Voile jaune fluide pour les points anciens > 72h (toujours actif avec les points)
+        # A) Voile jaune diffus pour les foyers > 72h
         if not df_old.empty:
-            old_group = folium.FeatureGroup(name="🟡 Zones anciennes (> 72h)", show=True)
             HeatMap(
                 df_old[['latitude', 'longitude']].values.tolist(),
                 radius=14,
                 blur=10,
                 min_opacity=0.25,
                 gradient={0.4: '#FFE082', 1.0: '#FFD54F'}
-            ).add_to(old_group)
-            old_group.add_to(m)
+            ).add_to(recency_group)
 
-        # Couche Points Précis (Activable seulement si zoom suffisant)
-        if current_zoom >= ZOOM_MIN_FOR_POINTS:
-            st.success(f"📍 Zoom suffisant ({current_zoom}) : La couche 'Points précis (<= 72h)' est disponible dans le menu.")
-            points_group = folium.FeatureGroup(name="📍 Points précis (<= 72h)", show=True)
+        # B) Points précis pour les foyers <= 72h
+        for _, row in df_recent.iterrows():
+            color, label_age, age_desc = get_recency_info(row['datetime'], now_utc)
             
-            # Limite de sécurité simple sans calcul complexe de Bounding Box
-            for _, row in df_recent.iterrows():
-                color, label_age, age_desc = get_recency_info(row['datetime'], now_utc)
-                
-                popup_html = f"""
-                <div style="font-family: Arial; font-size: 12px; min-width: 150px;">
-                    <b style="color:{color};">🔥 Foyer ({label_age})</b><br><br>
-                    <b>Ancienneté :</b> {age_desc}<br>
-                    <b>Date UTC :</b> {row['datetime_str']}<br>
-                    <b>Coordonnées :</b> {row['latitude']:.4f}, {row['longitude']:.4f}
-                </div>
-                """
-                
-                folium.CircleMarker(
-                    location=[row['latitude'], row['longitude']],
-                    radius=4,
-                    color="#000000",
-                    weight=0.5,
-                    fill=True,
-                    fill_color=color,
-                    fill_opacity=0.9,
-                    popup=folium.Popup(popup_html, max_width=220),
-                    tooltip=f"Feu {label_age}"
-                ).add_to(points_group)
-                
-            points_group.add_to(m)
-        else:
-            st.warning(f"🔍 Zoom actuel ({current_zoom}) : Zoomez davantage (zoom ≥ {ZOOM_MIN_FOR_POINTS}) pour pouvoir cocher les 'Points précis'.")
+            popup_html = f"""
+            <div style="font-family: Arial; font-size: 12px; min-width: 150px;">
+                <b style="color:{color};">🔥 Foyer ({label_age})</b><br><br>
+                <b>Ancienneté :</b> {age_desc}<br>
+                <b>Date UTC :</b> {row['datetime_str']}<br>
+                <b>Coordonnées :</b> {row['latitude']:.4f}, {row['longitude']:.4f}
+            </div>
+            """
+            
+            folium.CircleMarker(
+                location=[row['latitude'], row['longitude']],
+                radius=4,
+                color="#000000",
+                weight=0.5,
+                fill=True,
+                fill_color=color,
+                fill_opacity=0.9,
+                popup=folium.Popup(popup_html, max_width=220),
+                tooltip=f"Feu {label_age}"
+            ).add_to(recency_group)
 
-    # Contrôle unique des couches
+        recency_group.add_to(m)
+
+    # Sélecteur de couches unique (Activable/décochable librement par l'utilisateur)
     folium.LayerControl(collapsed=False).add_to(m)
 
-    # Affichage Folium simple (sans boucle de rechargement bounds)
-    map_output = st_folium(
-        m, 
-        width="100%", 
-        height=720, 
-        key="main_fire_map",
-        returned_objects=["zoom"]
-    )
-
-    # Seul le zoom est stocké pour débloquer/bloquer l'option dans le menu
-    if map_output and map_output.get("zoom") is not None:
-        if map_output["zoom"] != st.session_state.get("last_zoom"):
-            st.session_state["last_zoom"] = map_output["zoom"]
-            st.rerun()
+    # Rendu simple sans capture d'événements de zoom/bounds
+    st_folium(m, width="100%", height=720, key="main_fire_map")
 
 if __name__ == "__main__":
     main()
