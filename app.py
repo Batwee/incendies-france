@@ -10,7 +10,7 @@ import time
 from streamlit_autorefresh import st_autorefresh
 
 # ==========================================
-# CONFIGURATION
+# CONFIGURATION & DOSSIER DE CACHE
 # ==========================================
 st.set_page_config(page_title="Incendies & Forêts à Risque", page_icon="🌲", layout="wide")
 
@@ -22,82 +22,13 @@ FIRES_JSON_PATH = os.path.join(CACHE_DIR, "fires_data.json")
 FORESTS_GEOJSON_PATH = os.path.join(CACHE_DIR, "forests_data.geojson")
 WEATHER_JSON_PATH = os.path.join(CACHE_DIR, "weather_data.json")
 
-# ==========================================
-# CONTOURS GEOJSON DE SECOURS (MASSIFS FRANÇAIS)
-# ==========================================
-DEFAULT_FORESTS_GEOJSON = {
-    "type": "FeatureCollection",
-    "features": [
-        {
-            "type": "Feature",
-            "properties": {"name": "Forêt des Landes de Gascogne", "is_pine": True, "leaf_type": "needleleaved"},
-            "geometry": {
-                "type": "Polygon",
-                "coordinates": [[
-                    [-1.15, 44.75], [-0.35, 44.80], [-0.15, 44.05], [-0.55, 43.65], [-1.35, 43.60], [-1.45, 44.35], [-1.15, 44.75]
-                ]]
-            }
-        },
-        {
-            "type": "Feature",
-            "properties": {"name": "Massif des Maures & Estérel (Var)", "is_pine": True, "leaf_type": "needleleaved"},
-            "geometry": {
-                "type": "Polygon",
-                "coordinates": [[
-                    [6.10, 43.30], [6.90, 43.60], [6.95, 43.45], [6.60, 43.10], [6.20, 43.10], [6.10, 43.30]
-                ]]
-            }
-        },
-        {
-            "type": "Feature",
-            "properties": {"name": "Parc National des Cévennes", "is_pine": True, "leaf_type": "mixed"},
-            "geometry": {
-                "type": "Polygon",
-                "coordinates": [[
-                    [3.20, 44.40], [3.90, 44.50], [4.10, 44.10], [3.50, 43.90], [3.20, 44.40]
-                ]]
-            }
-        },
-        {
-            "type": "Feature",
-            "properties": {"name": "Massif des Vosges", "is_pine": True, "leaf_type": "needleleaved"},
-            "geometry": {
-                "type": "Polygon",
-                "coordinates": [[
-                    [6.80, 48.50], [7.50, 48.60], [7.30, 47.80], [6.70, 47.90], [6.80, 48.50]
-                ]]
-            }
-        },
-        {
-            "type": "Feature",
-            "properties": {"name": "Forêt de Fontainebleau", "is_pine": False, "leaf_type": "broadleaved"},
-            "geometry": {
-                "type": "Polygon",
-                "coordinates": [[
-                    [2.55, 48.48], [2.78, 48.46], [2.75, 48.32], [2.52, 48.34], [2.55, 48.48]
-                ]]
-            }
-        },
-        {
-            "type": "Feature",
-            "properties": {"name": "Forêts de Corse (Vizzavona / Bavella)", "is_pine": True, "leaf_type": "needleleaved"},
-            "geometry": {
-                "type": "Polygon",
-                "coordinates": [[
-                    [8.80, 42.20], [9.30, 42.30], [9.35, 41.70], [8.90, 41.75], [8.80, 42.20]
-                ]]
-            }
-        }
-    ]
-}
-
 def is_cache_valid(filepath, max_age_seconds):
     if os.path.exists(filepath):
         return (time.time() - os.path.getmtime(filepath)) < max_age_seconds
     return False
 
 # ==========================================
-# 1. INCENDIES ACTIFS (NASA FIRMS)
+# 1. INCENDIES ACTIFS (NASA FIRMS API/CSV)
 # ==========================================
 @st.cache_data(ttl=1800)
 def fetch_fires_data():
@@ -138,7 +69,7 @@ def fetch_fires_data():
     data['datetime_str'] = data['acq_date'] + ' ' + data['acq_time'].str[:2] + ':' + data['acq_time'].str[2:] + ':00'
     data['datetime'] = pd.to_datetime(data['datetime_str'])
 
-    # Essayer de garder 36h, sinon garder 7 jours si le filtre 36h ne donne rien
+    # Filtre sur les 36 dernières heures (ou 7j si aucun feu sur 36h)
     cutoff = datetime.datetime.utcnow() - datetime.timedelta(hours=36)
     data_filtered = data[data['datetime'] >= cutoff]
     if data_filtered.empty:
@@ -157,14 +88,16 @@ def fetch_fires_data():
     return data_clean
 
 # ==========================================
-# 2. MÉTÉO (OPEN-METEO)
+# 2. MÉTÉO (OPEN-METEO API)
 # ==========================================
 @st.cache_data(ttl=3600)
 def fetch_weather_grid():
     if is_cache_valid(WEATHER_JSON_PATH, 3600):
         try:
             with open(WEATHER_JSON_PATH, 'r') as f:
-                return json.load(f)
+                data = json.load(f)
+                if isinstance(data, dict) and data:
+                    return data
         except Exception:
             pass
 
@@ -181,22 +114,25 @@ def fetch_weather_grid():
     weather_dict = {}
     try:
         res = requests.get(url, timeout=8).json()
-        for i, loc in enumerate(res if isinstance(res, list) else [res]):
+        locations = res if isinstance(res, list) else [res]
+        for i, loc in enumerate(locations):
             cur = loc.get("current", {})
             weather_dict[f"{points[i][0]},{points[i][1]}"] = {
                 "temp": cur.get("temperature_2m", 22),
                 "humidity": cur.get("relative_humidity_2m", 45),
                 "wind": cur.get("wind_speed_10m", 15)
             }
-        with open(WEATHER_JSON_PATH, 'w') as f:
-            json.dump(weather_dict, f)
+        
+        if weather_dict:
+            with open(WEATHER_JSON_PATH, 'w') as f:
+                json.dump(weather_dict, f)
     except Exception:
         pass
 
-    return weather_dict
+    return weather_dict if isinstance(weather_dict, dict) else {}
 
 # ==========================================
-# 3. CONTOURS DES FORÊTS (GEOJSON GARANTI)
+# 3. FORÊTS DE FRANCE (API OVERPASS / OPENSTREETMAP)
 # ==========================================
 @st.cache_data(ttl=86400)
 def fetch_forest_polygons():
@@ -204,58 +140,70 @@ def fetch_forest_polygons():
         try:
             with open(FORESTS_GEOJSON_PATH, 'r', encoding='utf-8') as f:
                 data = json.load(f)
-                if data.get("features"):
+                if isinstance(data, dict) and data.get("features"):
                     return data
         except Exception:
             pass
 
-    # Tentative d'appel léger à l'API Overpass
+    # Requête ciblée vers l'API Overpass pour récupérer les contours des grands massifs forestiers
+    overpass_url = "https://overpass-api.de/api/interpreter"
     overpass_query = """
-    [out:json][timeout:10];
+    [out:json][timeout:15];
     (
-      way["landuse"="forest"](43.2,-0.8,44.8,-0.1);
-      way["landuse"="forest"](43.1,6.0,43.7,6.9);
+      way["landuse"="forest"]["name"](43.0,-1.5,44.8,0.0);
+      way["landuse"="forest"]["name"](43.0,5.5,44.0,7.0);
+      way["landuse"="forest"]["name"](43.5,3.0,44.5,4.5);
+      way["landuse"="forest"]["name"](48.0,6.5,49.0,7.5);
+      way["landuse"="forest"]["name"](48.2,2.4,48.6,2.8);
+      way["landuse"="forest"]["name"](41.5,8.5,42.5,9.5);
     );
-    out body 20;
+    out body 40;
     >;
     out skel qt;
     """
     
     try:
-        response = requests.post("https://overpass-api.de/api/interpreter", data={'data': overpass_query}, timeout=8)
-        data = response.json()
-        nodes = {node['id']: (node['lon'], node['lat']) for node in data.get('elements', []) if node['type'] == 'node'}
-        features = []
-        
-        for elem in data.get('elements', []):
-            if elem['type'] == 'way' and 'nodes' in elem:
-                coords = [nodes[nid] for nid in elem['nodes'] if nid in nodes]
-                if len(coords) >= 4 and coords[0] == coords[-1]:
-                    features.append({
-                        "type": "Feature",
-                        "geometry": {"type": "Polygon", "coordinates": [coords]},
-                        "properties": {
-                            "name": elem.get('tags', {}).get('name', 'Zone Forestière'),
-                            "is_pine": True,
-                            "leaf_type": "needleleaved"
-                        }
-                    })
-                    
-        if features:
-            geojson = {"type": "FeatureCollection", "features": features}
-            with open(FORESTS_GEOJSON_PATH, 'w', encoding='utf-8') as f:
-                json.dump(geojson, f)
-            return geojson
+        response = requests.post(overpass_url, data={'data': overpass_query}, timeout=12)
+        if response.status_code == 200:
+            data = response.json()
+            nodes = {node['id']: (node['lon'], node['lat']) for node in data.get('elements', []) if node['type'] == 'node'}
+            features = []
+            
+            for elem in data.get('elements', []):
+                if elem['type'] == 'way' and 'nodes' in elem:
+                    coords = [nodes[nid] for nid in elem['nodes'] if nid in nodes]
+                    if len(coords) >= 4 and coords[0] == coords[-1]:
+                        tags = elem.get('tags', {})
+                        name = tags.get('name', 'Zone Forestière')
+                        leaf_type = tags.get('leaf_type', '')
+                        is_pine = leaf_type in ['needleleaved', 'mixed'] or any(w in name.lower() for w in ['pin', 'landes', 'maures', 'esterel'])
+                        
+                        features.append({
+                            "type": "Feature",
+                            "geometry": {"type": "Polygon", "coordinates": [coords]},
+                            "properties": {
+                                "name": name,
+                                "is_pine": is_pine
+                            }
+                        })
+                        
+            if features:
+                geojson = {"type": "FeatureCollection", "features": features}
+                with open(FORESTS_GEOJSON_PATH, 'w', encoding='utf-8') as f:
+                    json.dump(geojson, f)
+                return geojson
     except Exception:
         pass
 
-    # Si Overpass échoue ou dépasse le délai, retourner la base complète intégrée
-    return DEFAULT_FORESTS_GEOJSON
+    return {"type": "FeatureCollection", "features": []}
 
 # ==========================================
-# ANALYSE DU RISQUE PAR FORÊT
+# ANALYSE DU RISQUE D'INCENDIE
 # ==========================================
 def analyze_forest_risk(feature, df_fires, weather_data):
+    if not isinstance(weather_data, dict):
+        weather_data = {}
+
     coords = feature['geometry']['coordinates'][0]
     lons = [c[0] for c in coords]
     lats = [c[1] for c in coords]
@@ -264,7 +212,7 @@ def analyze_forest_risk(feature, df_fires, weather_data):
     min_lat, max_lat = min(lats), max(lats)
     center_lat, center_lon = (min_lat + max_lat) / 2, (min_lon + max_lon) / 2
 
-    # Incendie à proximité
+    # Détection d'incendie actif à proximité
     has_fire = False
     if not df_fires.empty:
         fires_near = df_fires[
@@ -282,18 +230,22 @@ def analyze_forest_risk(feature, df_fires, weather_data):
             "risk_label": "🔥 Foyer d'incendie détecté par satellite"
         }
 
-    # Données météo les plus proches
+    # Station météo la plus proche
     closest_weather = {"temp": 22, "humidity": 45, "wind": 15}
     min_dist = 999
+    
     for key, w_info in weather_data.items():
-        w_lat, w_lon = map(float, key.split(','))
-        dist = ((w_lat - center_lat)**2 + (w_lon - center_lon)**2)**0.5
-        if dist < min_dist:
-            min_dist = dist
-            closest_weather = w_info
+        try:
+            w_lat, w_lon = map(float, key.split(','))
+            dist = ((w_lat - center_lat)**2 + (w_lon - center_lon)**2)**0.5
+            if dist < min_dist:
+                min_dist = dist
+                closest_weather = w_info
+        except Exception:
+            continue
 
-    temp = closest_weather['temp']
-    hum = closest_weather['humidity']
+    temp = closest_weather.get('temp', 22)
+    hum = closest_weather.get('humidity', 45)
     is_pine = feature['properties'].get('is_pine', False)
 
     is_very_dry = (temp >= 24 and hum <= 45) or (temp >= 28) or (hum <= 35)
@@ -304,7 +256,7 @@ def analyze_forest_risk(feature, df_fires, weather_data):
             "color": "#E65100",
             "fillColor": "#FF5722",
             "opacity": 0.70,
-            "risk_label": f"⚠️ Climat très sec & résineux (Temp: {temp}°C, Humidité: {hum}%)"
+            "risk_label": f"⚠️ Climat très sec & essence résineuse ({temp}°C, Humidité: {hum}%)"
         }
     elif is_very_dry or is_pine:
         return {
@@ -312,7 +264,7 @@ def analyze_forest_risk(feature, df_fires, weather_data):
             "color": "#F57C00",
             "fillColor": "#FF9800",
             "opacity": 0.55,
-            "risk_label": f"⚡ Sécheresse / Risque modéré (Temp: {temp}°C, Humidité: {hum}%)"
+            "risk_label": f"⚡ Conditions propices ({temp}°C, Humidité: {hum}%)"
         }
     else:
         return {
@@ -320,14 +272,14 @@ def analyze_forest_risk(feature, df_fires, weather_data):
             "color": "#2E7D32",
             "fillColor": "#4CAF50",
             "opacity": 0.40,
-            "risk_label": f"🌲 Conditions normales (Temp: {temp}°C, Humidité: {hum}%)"
+            "risk_label": f"🌲 Conditions normales ({temp}°C, Humidité: {hum}%)"
         }
 
 # ==========================================
-# APPLICATION PRINCIPALE
+# INTERFACE PRINCIPALE
 # ==========================================
 def main():
-    st.title("🌲 Zones Forestières & Incendies en France")
+    st.title("🌲 Carte des Incendies & Massifs Forestiers (France)")
     
     st_autorefresh(interval=5 * 60 * 1000, key="datarefresh")
     
@@ -335,16 +287,14 @@ def main():
     weather_data = fetch_weather_grid()
     forests_geojson = fetch_forest_polygons()
 
-    # Indicateurs
     col1, col2, col3 = st.columns(3)
     col1.metric("🔥 Foyers récents détectés", len(df_fires) if not df_fires.empty else 0)
-    col2.metric("🌲 Massifs forestiers suivis", len(forests_geojson.get('features', [])))
-    col3.metric("⏱️ Actualisation carte", datetime.datetime.now().strftime("%H:%M:%S"))
+    col2.metric("🌲 Massifs forestiers chargés", len(forests_geojson.get('features', [])))
+    col3.metric("⏱️ Dernière mise à jour", datetime.datetime.now().strftime("%H:%M:%S"))
 
-    # Initialisation de la carte Leaflet
     m = folium.Map(location=[45.8, 2.5], zoom_start=6, tiles="CartoDB dark_matter")
 
-    # 1. Rendu des massifs forestiers (GeoJSON)
+    # 1. Couche des Forêts (Overpass API)
     if forests_geojson.get('features'):
         for feature in forests_geojson['features']:
             risk = analyze_forest_risk(feature, df_fires, weather_data)
@@ -370,9 +320,9 @@ def main():
                 popup=folium.Popup(popup_html, max_width=280)
             ).add_to(m)
 
-    # 2. Rendu direct des foyers d'incendies (Cercles rouges vifs)
+    # 2. Couche des Foyers d'Incendie (NASA FIRMS)
     if not df_fires.empty:
-        fire_group = folium.FeatureGroup(name="Foyers d'incendies détectés", show=True)
+        fire_group = folium.FeatureGroup(name="Foyers d'incendies", show=True)
         for _, row in df_fires.iterrows():
             popup_fire = f"""
             <div style="font-family: Arial; font-size: 12px;">
@@ -389,11 +339,10 @@ def main():
                 fill_color="#FF0000",
                 fill_opacity=0.9,
                 popup=folium.Popup(popup_fire, max_width=220),
-                tooltip="🔥 Foyer d'incendie actif"
+                tooltip="🔥 Foyer d'incendie"
             ).add_to(fire_group)
         fire_group.add_to(m)
 
-    # Affichage unique
     st_folium(m, width="100%", height=720, returned_objects=[])
 
 if __name__ == "__main__":
