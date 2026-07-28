@@ -13,13 +13,14 @@ from streamlit_autorefresh import st_autorefresh
 # ==========================================
 # CONFIGURATION
 # ==========================================
-st.set_page_config(page_title="Suivi des Incendies en France", page_icon="🔥", layout="wide")
+st.set_page_config(page_title="Suivi Satellite des Incendies", page_icon="🔥", layout="wide")
 
-FRANCE_BBOX = {"lat_min": 41.3, "lat_max": 51.1, "lon_min": -5.2, "lon_max": 9.6}
+# Emprise géographique élargie (France métropolitaine + Corse)
+FRANCE_BBOX = {"lat_min": 41.0, "lat_max": 51.5, "lon_min": -5.5, "lon_max": 10.0}
 
 CACHE_DIR = "cache_data"
 os.makedirs(CACHE_DIR, exist_ok=True)
-FIRES_JSON_PATH = os.path.join(CACHE_DIR, "fires_data.json")
+FIRES_JSON_PATH = os.path.join(CACHE_DIR, "fires_data_multi.json")
 
 def is_cache_valid(filepath, max_age_seconds):
     if os.path.exists(filepath):
@@ -27,26 +28,28 @@ def is_cache_valid(filepath, max_age_seconds):
     return False
 
 # ==========================================
-# RÉCUPÉRATION ET CLASSIFICATION DES FEUX (NASA FIRMS)
+# CLASSIFICATION SELON L'ANCIENNETÉ
 # ==========================================
 def get_recency_info(dt):
-    """Retourne la couleur et l'étiquette selon l'ancienneté de la détection."""
     now = datetime.datetime.utcnow()
     hours_ago = (now - dt).total_seconds() / 3600.0
 
     if hours_ago <= 12:
-        return "#8B0000", "< 12h", "Moins de 12h"      # Rouge très foncé
+        return "#8B0000", "< 12h", "Moins de 12 heures"    # Rouge très foncé
     elif hours_ago <= 24:
-        return "#FF0000", "< 24h", "12h à 24h"         # Rouge
+        return "#FF0000", "< 24h", "12h à 24h"           # Rouge vif
     elif hours_ago <= 48:
-        return "#FF7F00", "< 48h", "24h à 48h"         # Orange
+        return "#FF7F00", "< 48h", "24h à 48h"           # Orange
     elif hours_ago <= 72:
-        return "#FFB84D", "< 72h", "48h à 72h"         # Orange clair
+        return "#FFB84D", "< 72h", "48h à 72h"           # Orange clair
     else:
-        return "#FFE082", "> 72h", "Plus de 72h"       # Jaune / pâle
+        return "#FFE082", "> 72h", "Plus de 72h"         # Jaune clair
 
+# ==========================================
+# RÉCUPÉRATION DE TOUTES LES SOURCES SATELLITES (NASA FIRMS)
+# ==========================================
 @st.cache_data(ttl=1800)
-def fetch_fires_data():
+def fetch_all_fires_data():
     if is_cache_valid(FIRES_JSON_PATH, 1800):
         try:
             df = pd.read_json(FIRES_JSON_PATH)
@@ -56,8 +59,11 @@ def fetch_fires_data():
         except Exception:
             pass
 
+    # Flux 7 jours complets couvrant l'Europe (Toutes constellations satellites disponibles)
     urls = [
         "https://firms.modaps.eosdis.nasa.gov/data/active_fire/suomi-npp-viirs-c2/csv/SUOMI_NPP_VIIRS_C2_Europe_7d.csv",
+        "https://firms.modaps.eosdis.nasa.gov/data/active_fire/noaa-20-viirs-c2/csv/J1_VIIRS_C2_Europe_7d.csv",
+        "https://firms.modaps.eosdis.nasa.gov/data/active_fire/noaa-21-viirs-c2/csv/J2_VIIRS_C2_Europe_7d.csv",
         "https://firms.modaps.eosdis.nasa.gov/data/active_fire/modis-c6.1/csv/MODIS_C6_1_Europe_7d.csv"
     ]
     
@@ -80,12 +86,14 @@ def fetch_fires_data():
         return pd.DataFrame()
 
     data = pd.concat(dfs, ignore_index=True)
+    
+    # Formatage propre des timestamps
     data['acq_time'] = data['acq_time'].astype(str).str.zfill(4)
     data['datetime_str'] = data['acq_date'] + ' ' + data['acq_time'].str[:2] + ':' + data['acq_time'].str[2:] + ':00'
     data['datetime'] = pd.to_datetime(data['datetime_str'])
 
     columns_to_keep = ['latitude', 'longitude', 'datetime_str', 'confidence']
-    data_clean = data[columns_to_keep].drop_duplicates().copy()
+    data_clean = data[columns_to_keep].drop_duplicates(subset=['latitude', 'longitude', 'datetime_str']).copy()
 
     if not data_clean.empty:
         try:
@@ -100,76 +108,111 @@ def fetch_fires_data():
 # APPLICATION PRINCIPALE
 # ==========================================
 def main():
-    st.title("🔥 Carte d'Incendies Actifs en France")
+    st.title("🔥 Carte de Détection des Foyers par Satellite")
     
-    # Rafraîchissement automatique toutes les 5 min
     st_autorefresh(interval=5 * 60 * 1000, key="datarefresh")
     
-    df_fires = fetch_fires_data()
+    df_fires = fetch_all_fires_data()
 
-    # Barre latérale - Légende des couleurs
+    # Barre latérale
     st.sidebar.header("🎨 Légende de Récence")
     st.sidebar.markdown("""
-    - 🟤 **Rouge très foncé** : < 12h
-    - 🔴 **Rouge** : 12h à 24h
+    - 🟤 **Rouge très foncé** : Moins de 12h
+    - 🔴 **Rouge vif** : 12h à 24h
     - 🟠 **Orange** : 24h à 48h
     - 🟡 **Orange clair** : 48h à 72h
-    - ⚪ **Jaune** : > 72h
+    - ⚪ **Jaune** : Plus de 72h
     """)
-    st.sidebar.info("💡 **Astuce** : Dézoomez pour voir la densité globale (Heatmap) ou zoomez pour isoler chaque foyer précis.")
+    st.sidebar.markdown("---")
+    st.sidebar.info("""
+    **Affichage intelligent :**
+    - **Dézoome (Vue nationale)** : La carte thermique indique la densité globale des zones touchées sans surcharger les foyers isolés.
+    - **Zoome (Vue départementale)** : La heatmap s'efface pour laisser apparaître uniquement les points précis.
+    """)
 
-    # Statistiques
     col1, col2 = st.columns(2)
-    col1.metric("🔥 Total foyers détectés (7 jours)", len(df_fires) if not df_fires.empty else 0)
-    col2.metric("⏱️ Dernière actualisation", datetime.datetime.now().strftime("%H:%M:%S"))
+    col1.metric("🔥 Total des détections (7 derniers jours)", len(df_fires) if not df_fires.empty else 0)
+    col2.metric("⏱️ Horodatage", datetime.datetime.now().strftime("%H:%M:%S"))
 
-    # Initialisation de la carte Leaflet
-    m = folium.Map(location=[46.5, 2.5], zoom_start=6, tiles="CartoDB dark_matter")
+    # Initialisation de la carte Folium sans fond par défaut (définis ci-dessous)
+    m = folium.Map(location=[46.5, 2.5], zoom_start=6, tiles=None)
+
+    # 1. FONDS DE CARTE SELECTIONNABLES
+    # Vue Satellite HD Esri
+    folium.TileLayer(
+        tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+        attr="Esri World Imagery",
+        name="🛰️ Satellite HD (Esri)",
+        overlay=False,
+        control=True
+    ).add_to(m)
+
+    # Vue Topographique / Végétation
+    folium.TileLayer(
+        tiles="https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png",
+        attr="OpenTopoMap",
+        name="🌲 Relief & Végétation (OpenTopoMap)",
+        overlay=False,
+        control=True
+    ).add_to(m)
+
+    # Vue Plan standard OpenStreetMap
+    folium.TileLayer(
+        tiles="OpenStreetMap",
+        name="🗺️ Carte Routière (OpenStreetMap)",
+        overlay=False,
+        control=True
+    ).add_to(m)
 
     if not df_fires.empty:
-        # 1. COUCHE HEATMAP (DENSITÉ À L'ÉCHELLE NATIONALE)
-        heat_data = [[row['latitude'], row['longitude'], 1.0] for _, row in df_fires.iterrows()]
-        HeatMap(
+        # 2. COUCHE HEATMAP ADAPTATIVE (Visuel global dézoomé, masqué si zoom > 8)
+        heat_data = [[row['latitude'], row['longitude'], 0.6] for _, row in df_fires.iterrows()]
+        
+        heatmap_layer = HeatMap(
             heat_data,
-            name="Densité (Heatmap)",
-            radius=18,
-            blur=12,
-            min_opacity=0.35,
-            gradient={0.2: '#FFE082', 0.4: '#FF7F00', 0.7: '#FF0000', 1.0: '#8B0000'}
-        ).add_to(m)
+            name="🔥 Densité (Vue d'ensemble)",
+            radius=11,          # Rayon restreint pour ne pas saturer sur un point isolé
+            blur=9,             # Flou modéré
+            min_opacity=0.25,
+            max_zoom=8,         # Masque automatiquement la heatmap dès qu'on zoome plus près
+            gradient={0.3: '#FFE082', 0.6: '#FF7F00', 0.85: '#FF0000', 1.0: '#8B0000'}
+        )
+        heatmap_layer.add_to(m)
 
-        # 2. COUCHE FOYERS INDIVIDUELS (PETITS RONDS PRÉCIS)
-        points_group = folium.FeatureGroup(name="Points précis (Récence)", show=True)
+        # 3. COUCHE POINTS PRÉCIS (Visibles à toutes les échelles, prioritaires au zoom)
+        points_group = folium.FeatureGroup(name="📍 Points précis (Horodatés)", show=True)
         
         for _, row in df_fires.iterrows():
             color, label_age, age_desc = get_recency_info(row['datetime'])
             
             popup_html = f"""
-            <div style="font-family: Arial; font-size: 12px; min-width: 160px;">
-                <b style="color:{color};">🔥 Foyer d'incendie ({label_age})</b><br><br>
+            <div style="font-family: Arial; font-size: 12px; min-width: 170px;">
+                <b style="color:{color};">🔥 Détection satellite ({label_age})</b><br><br>
                 <b>Ancienneté :</b> {age_desc}<br>
-                <b>Date UTC :</b> {row['datetime_str']}<br>
+                <b>Date/Heure UTC :</b> {row['datetime_str']}<br>
                 <b>Coordonnées :</b> {row['latitude']:.4f}, {row['longitude']:.4f}
             </div>
             """
             
             folium.CircleMarker(
                 location=[row['latitude'], row['longitude']],
-                radius=4,               # Petit rond discret
-                color=color,
+                radius=3.5,              # Petit rond très lisible
+                color="#000000",         # Bordure noire fine pour ressortir sur fond satellite
+                weight=0.5,
                 fill=True,
                 fill_color=color,
-                fill_opacity=0.9,
-                weight=1,
-                popup=folium.Popup(popup_html, max_width=220),
-                tooltip=f"Incendie {label_age} ({row['datetime_str']})"
+                fill_opacity=0.95,
+                popup=folium.Popup(popup_html, max_width=240),
+                tooltip=f"Feu {label_age} ({row['datetime_str']})"
             ).add_to(points_group)
 
         points_group.add_to(m)
-        folium.LayerControl(collapsed=False).add_to(m)
 
-    # Affichage de la carte
-    st_folium(m, width="100%", height=750, returned_objects=[])
+    # Sélecteur de couches en haut à droite de la carte
+    folium.LayerControl(collapsed=False).add_to(m)
+
+    # Rendu final
+    st_folium(m, width="100%", height=760, returned_objects=[])
 
 if __name__ == "__main__":
     main()
