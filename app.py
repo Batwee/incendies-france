@@ -123,8 +123,8 @@ def main():
     </div>
     """, unsafe_allow_html=True)
 
-    # Initialisation carte centrée sur la zone France-Espagne
-    m = folium.Map(location=[43.0, 1.5], zoom_start=5, tiles=None)
+    # 🚀 OPTIMISATION MAJEURE LEAFLET : prefer_canvas=True force le rendu sur Canvas HTML5 au lieu du DOM SVG lourd
+    m = folium.Map(location=[43.0, 1.5], zoom_start=5, prefer_canvas=True, tiles=None)
 
     # Fonds de carte
     folium.TileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", attr="Esri", name="🛰️ Satellite HD", overlay=False).add_to(m)
@@ -132,7 +132,7 @@ def main():
     folium.TileLayer("OpenStreetMap", name="🗺️ Carte Routière", overlay=False).add_to(m)
 
     if not df_fires.empty:
-        # 1. FILTRE 1 : HEATMAP (DENSITÉ) - COCHÉ PAR DÉFAUT (show=True)
+        # 1. FILTRE 1 : HEATMAP (DENSITÉ) - Cochée par défaut
         heat_group = folium.FeatureGroup(name="🔥 Heatmap (Densité)", show=True)
         HeatMap(
             df_fires[['latitude', 'longitude']].values.tolist(),
@@ -143,7 +143,7 @@ def main():
         ).add_to(heat_group)
         heat_group.add_to(m)
 
-        # 2. FILTRE 2 : RÉCENCE (Secteurs anciens jaunes + Points précis) - DÉCOCHÉ PAR DÉFAUT (show=False)
+        # 2. FILTRE 2 : RÉCENCE (Zones anciennes + Points précis) - Décochée par défaut
         recency_group = folium.FeatureGroup(name="🎨 Récence (Points & zones par âge)", show=False)
 
         hours_ago_series = (now_utc - df_fires['datetime']).dt.total_seconds() / 3600.0
@@ -160,7 +160,7 @@ def main():
                 gradient={0.4: '#FFE082', 1.0: '#FFD54F'}
             ).add_to(recency_group)
 
-        # B) Points précis pour les foyers <= 72h
+        # B) Points précis pour les foyers <= 72h (rendu instantané grâce au Canvas natif Leaflet)
         for _, row in df_recent.iterrows():
             color, label_age, age_desc = get_recency_info(row['datetime'], now_utc)
             
@@ -187,10 +187,10 @@ def main():
 
         recency_group.add_to(m)
 
-    # Sélecteur de couches unique (Activable/décochable librement par l'utilisateur)
+    # Contrôle des couches
     folium.LayerControl(collapsed=False).add_to(m)
 
-    # Rendu simple sans capture d'événements de zoom/bounds
+    # Affichage de la carte
     st_folium(m, width="100%", height=720, key="main_fire_map")
 
 if __name__ == "__main__":
