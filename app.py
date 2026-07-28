@@ -13,14 +13,14 @@ from streamlit_autorefresh import st_autorefresh
 # ==========================================
 # CONFIGURATION
 # ==========================================
-st.set_page_config(page_title="Suivi Satellite des Incendies", page_icon="🔥", layout="wide")
+st.set_page_config(page_title="Suivi Satellite des Incendies (France & Espagne)", page_icon="🔥", layout="wide")
 
-# Emprise géographique élargie (France métropolitaine + Corse)
-FRANCE_BBOX = {"lat_min": 41.0, "lat_max": 51.5, "lon_min": -5.5, "lon_max": 10.0}
+# Zone géographique (France + Espagne + Portugal)
+REGION_BBOX = {"lat_min": 35.0, "lat_max": 51.5, "lon_min": -10.0, "lon_max": 10.0}
 
 CACHE_DIR = "cache_data"
 os.makedirs(CACHE_DIR, exist_ok=True)
-FIRES_JSON_PATH = os.path.join(CACHE_DIR, "fires_data_multi.json")
+FIRES_JSON_PATH = os.path.join(CACHE_DIR, "fires_data_fr_es.json")
 
 def is_cache_valid(filepath, max_age_seconds):
     if os.path.exists(filepath):
@@ -59,7 +59,6 @@ def fetch_all_fires_data():
         except Exception:
             pass
 
-    # Flux 7 jours complets couvrant l'Europe (Toutes constellations satellites disponibles)
     urls = [
         "https://firms.modaps.eosdis.nasa.gov/data/active_fire/suomi-npp-viirs-c2/csv/SUOMI_NPP_VIIRS_C2_Europe_7d.csv",
         "https://firms.modaps.eosdis.nasa.gov/data/active_fire/noaa-20-viirs-c2/csv/J1_VIIRS_C2_Europe_7d.csv",
@@ -71,14 +70,14 @@ def fetch_all_fires_data():
     for url in urls:
         try:
             df_raw = pd.read_csv(url)
-            df_fr = df_raw[
-                (df_raw['latitude'] >= FRANCE_BBOX["lat_min"]) & 
-                (df_raw['latitude'] <= FRANCE_BBOX["lat_max"]) &
-                (df_raw['longitude'] >= FRANCE_BBOX["lon_min"]) & 
-                (df_raw['longitude'] <= FRANCE_BBOX["lon_max"])
+            df_sub = df_raw[
+                (df_raw['latitude'] >= REGION_BBOX["lat_min"]) & 
+                (df_raw['latitude'] <= REGION_BBOX["lat_max"]) &
+                (df_raw['longitude'] >= REGION_BBOX["lon_min"]) & 
+                (df_raw['longitude'] <= REGION_BBOX["lon_max"])
             ].copy()
-            if not df_fr.empty:
-                dfs.append(df_fr)
+            if not df_sub.empty:
+                dfs.append(df_sub)
         except Exception:
             continue
 
@@ -86,8 +85,6 @@ def fetch_all_fires_data():
         return pd.DataFrame()
 
     data = pd.concat(dfs, ignore_index=True)
-    
-    # Formatage propre des timestamps
     data['acq_time'] = data['acq_time'].astype(str).str.zfill(4)
     data['datetime_str'] = data['acq_date'] + ' ' + data['acq_time'].str[:2] + ':' + data['acq_time'].str[2:] + ':00'
     data['datetime'] = pd.to_datetime(data['datetime_str'])
@@ -108,111 +105,137 @@ def fetch_all_fires_data():
 # APPLICATION PRINCIPALE
 # ==========================================
 def main():
-    st.title("🔥 Carte de Détection des Foyers par Satellite")
+    st.title("🔥 Détection des Foyers par Satellite (France & Espagne)")
     
+    # Rafraîchissement automatique toutes les 5 min
     st_autorefresh(interval=5 * 60 * 1000, key="datarefresh")
     
     df_fires = fetch_all_fires_data()
 
-    # Barre latérale
-    st.sidebar.header("🎨 Légende de Récence")
-    st.sidebar.markdown("""
-    - 🟤 **Rouge très foncé** : Moins de 12h
-    - 🔴 **Rouge vif** : 12h à 24h
-    - 🟠 **Orange** : 24h à 48h
-    - 🟡 **Orange clair** : 48h à 72h
-    - ⚪ **Jaune** : Plus de 72h
-    """)
-    st.sidebar.markdown("---")
-    st.sidebar.info("""
-    **Affichage intelligent :**
-    - **Dézoome (Vue nationale)** : La carte thermique indique la densité globale des zones touchées sans surcharger les foyers isolés.
-    - **Zoome (Vue départementale)** : La heatmap s'efface pour laisser apparaître uniquement les points précis.
-    """)
-
+    # Indicateurs
     col1, col2 = st.columns(2)
-    col1.metric("🔥 Total des détections (7 derniers jours)", len(df_fires) if not df_fires.empty else 0)
-    col2.metric("⏱️ Horodatage", datetime.datetime.now().strftime("%H:%M:%S"))
+    col1.metric("🔥 Total foyers détectés (7 jours)", len(df_fires) if not df_fires.empty else 0)
+    col2.metric("⏱️ Dernière actualisation", datetime.datetime.now().strftime("%H:%M:%S"))
 
-    # Initialisation de la carte Folium sans fond par défaut (définis ci-dessous)
-    m = folium.Map(location=[46.5, 2.5], zoom_start=6, tiles=None)
+    # LÉGENDE AU-DESSUS DE LA CARTE
+    st.markdown("""
+    <div style="background-color: #1e1e1e; padding: 12px; border-radius: 8px; margin-bottom: 12px; border: 1px solid #333;">
+        <span style="font-weight: bold; margin-right: 15px; color: #fff;">🎨 Récence des détections :</span>
+        <span style="margin-right: 15px; font-size: 14px;"><span style="color:#8B0000;">🟤</span> <b>&lt; 12h</b></span>
+        <span style="margin-right: 15px; font-size: 14px;"><span style="color:#FF0000;">🔴</span> <b>12h à 24h</b></span>
+        <span style="margin-right: 15px; font-size: 14px;"><span style="color:#FF7F00;">🟠</span> <b>24h à 48h</b></span>
+        <span style="margin-right: 15px; font-size: 14px;"><span style="color:#FFB84D;">🟡</span> <b>48h à 72h</b></span>
+        <span style="margin-right: 15px; font-size: 14px;"><span style="color:#FFE082;">⚪</span> <b>&gt; 72h</b></span>
+    </div>
+    """, unsafe_allow_html=True)
 
-    # 1. FONDS DE CARTE SELECTIONNABLES
-    # Vue Satellite HD Esri
+    # Récupération du niveau de zoom en session
+    current_zoom = st.session_state.get("last_zoom", 5)
+    current_bounds = st.session_state.get("last_bounds", None)
+
+    # Initialisation de la carte (Centrée sur les Pyrénées)
+    m = folium.Map(location=[43.0, 1.5], zoom_start=current_zoom, tiles=None)
+
+    # FONDS DE CARTE (Seuls éléments sélectionnables dans le menu)
     folium.TileLayer(
         tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
         attr="Esri World Imagery",
         name="🛰️ Satellite HD (Esri)",
-        overlay=False,
-        control=True
+        overlay=False
     ).add_to(m)
 
-    # Vue Topographique / Végétation
     folium.TileLayer(
         tiles="https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png",
         attr="OpenTopoMap",
-        name="🌲 Relief & Végétation (OpenTopoMap)",
-        overlay=False,
-        control=True
+        name="🌲 Relief & Végétation",
+        overlay=False
     ).add_to(m)
 
-    # Vue Plan standard OpenStreetMap
     folium.TileLayer(
         tiles="OpenStreetMap",
-        name="🗺️ Carte Routière (OpenStreetMap)",
-        overlay=False,
-        control=True
+        name="🗺️ Carte Routière",
+        overlay=False
     ).add_to(m)
 
+    # GESTION DYNAMIQUE DE L'AFFICHAGE SELON LE ZOOM
+    ZOOM_THRESHOLD = 8  # Niveau de zoom pour basculer en vue départementale
+
     if not df_fires.empty:
-        # 2. COUCHE HEATMAP ADAPTATIVE (Visuel global dézoomé, masqué si zoom > 8)
-        heat_data = [[row['latitude'], row['longitude'], 0.6] for _, row in df_fires.iterrows()]
-        
-        heatmap_layer = HeatMap(
-            heat_data,
-            name="🔥 Densité (Vue d'ensemble)",
-            radius=11,          # Rayon restreint pour ne pas saturer sur un point isolé
-            blur=9,             # Flou modéré
-            min_opacity=0.25,
-            max_zoom=8,         # Masque automatiquement la heatmap dès qu'on zoome plus près
-            gradient={0.3: '#FFE082', 0.6: '#FF7F00', 0.85: '#FF0000', 1.0: '#8B0000'}
-        )
-        heatmap_layer.add_to(m)
-
-        # 3. COUCHE POINTS PRÉCIS (Visibles à toutes les échelles, prioritaires au zoom)
-        points_group = folium.FeatureGroup(name="📍 Points précis (Horodatés)", show=True)
-        
-        for _, row in df_fires.iterrows():
-            color, label_age, age_desc = get_recency_info(row['datetime'])
+        if current_zoom < ZOOM_THRESHOLD:
+            # VUE GLOBALE (ZOOM < 8) : DENSITÉ SEULE (Directement sur la carte, non sélectionnable dans le menu)
+            st.info("🗺️ **Vue d'ensemble** : Affichage de la densité des foyers. Zoomez sur un département (zoom ≥ 8) pour afficher les points précis.")
             
-            popup_html = f"""
-            <div style="font-family: Arial; font-size: 12px; min-width: 170px;">
-                <b style="color:{color};">🔥 Détection satellite ({label_age})</b><br><br>
-                <b>Ancienneté :</b> {age_desc}<br>
-                <b>Date/Heure UTC :</b> {row['datetime_str']}<br>
-                <b>Coordonnées :</b> {row['latitude']:.4f}, {row['longitude']:.4f}
-            </div>
-            """
+            heat_data = [[row['latitude'], row['longitude'], 0.5] for _, row in df_fires.iterrows()]
+            HeatMap(
+                heat_data,
+                radius=11,
+                blur=9,
+                min_opacity=0.3,
+                gradient={0.2: '#FFE082', 0.5: '#FF7F00', 0.8: '#FF0000', 1.0: '#8B0000'}
+            ).add_to(m)
+
+        else:
+            # VUE DÉPARTEMENTALE/LOCALE (ZOOM >= 8) : POINTS PRÉCIS
+            st.success(f"📍 **Niveau de zoom actif ({current_zoom})** : Affichage des points précis.")
             
-            folium.CircleMarker(
-                location=[row['latitude'], row['longitude']],
-                radius=3.5,              # Petit rond très lisible
-                color="#000000",         # Bordure noire fine pour ressortir sur fond satellite
-                weight=0.5,
-                fill=True,
-                fill_color=color,
-                fill_opacity=0.95,
-                popup=folium.Popup(popup_html, max_width=240),
-                tooltip=f"Feu {label_age} ({row['datetime_str']})"
-            ).add_to(points_group)
+            # Filtrage sur l'emprise visible de la carte pour garder 100% de fluidité
+            df_visible = df_fires
+            if current_bounds:
+                try:
+                    sw = current_bounds['_southWest']
+                    ne = current_bounds['_northEast']
+                    df_visible = df_fires[
+                        (df_fires['latitude'] >= sw['lat']) & (df_fires['latitude'] <= ne['lat']) &
+                        (df_fires['longitude'] >= sw['lng']) & (df_fires['longitude'] <= ne['lng'])
+                    ]
+                except Exception:
+                    df_visible = df_fires
 
-        points_group.add_to(m)
+            for _, row in df_visible.iterrows():
+                color, label_age, age_desc = get_recency_info(row['datetime'])
+                
+                popup_html = f"""
+                <div style="font-family: Arial; font-size: 12px; min-width: 160px;">
+                    <b style="color:{color};">🔥 Foyer d'incendie ({label_age})</b><br><br>
+                    <b>Ancienneté :</b> {age_desc}<br>
+                    <b>Date UTC :</b> {row['datetime_str']}<br>
+                    <b>Coordonnées :</b> {row['latitude']:.4f}, {row['longitude']:.4f}
+                </div>
+                """
+                
+                folium.CircleMarker(
+                    location=[row['latitude'], row['longitude']],
+                    radius=3.5,
+                    color="#000000",
+                    weight=0.5,
+                    fill=True,
+                    fill_color=color,
+                    fill_opacity=0.95,
+                    popup=folium.Popup(popup_html, max_width=220),
+                    tooltip=f"Feu {label_age} ({row['datetime_str']})"
+                ).add_to(m)
 
-    # Sélecteur de couches en haut à droite de la carte
+    # Sélecteur de fond de carte (uniquement les fonds satellite / relief / OSM)
     folium.LayerControl(collapsed=False).add_to(m)
 
-    # Rendu final
-    st_folium(m, width="100%", height=760, returned_objects=[])
+    # Rendu Folium & capture des événements de zoom/déplacement
+    map_output = st_folium(
+        m, 
+        width="100%", 
+        height=720, 
+        key="main_fire_map",
+        returned_objects=["zoom", "bounds"]
+    )
+
+    # Mise à jour réactive du niveau de zoom dans la session Streamlit
+    if map_output and "zoom" in map_output and map_output["zoom"] is not None:
+        new_zoom = map_output["zoom"]
+        new_bounds = map_output.get("bounds")
+        
+        if new_zoom != st.session_state.get("last_zoom") or new_bounds != st.session_state.get("last_bounds"):
+            st.session_state["last_zoom"] = new_zoom
+            st.session_state["last_bounds"] = new_bounds
+            st.rerun()
 
 if __name__ == "__main__":
     main()
