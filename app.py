@@ -3,9 +3,7 @@ import pandas as pd
 import folium
 from folium.plugins import HeatMap
 from streamlit_folium import st_folium
-import requests
 import datetime
-import json
 import os
 import time
 from streamlit_autorefresh import st_autorefresh
@@ -26,25 +24,22 @@ def is_cache_valid(filepath, max_age_seconds):
         return (time.time() - os.path.getmtime(filepath)) < max_age_seconds
     return False
 
-# ==========================================
-# CLASSIFICATION SELON L'ANCIENNETÉ
-# ==========================================
 def get_recency_info(dt, now):
     hours_ago = (now - dt).total_seconds() / 3600.0
 
     if hours_ago <= 12:
-        return "#8B0000", "< 12h", "Moins de 12 heures", True
+        return "#8B0000", "< 12h", "Moins de 12 heures"
     elif hours_ago <= 24:
-        return "#FF0000", "< 24h", "12h à 24h", True
+        return "#FF0000", "< 24h", "12h à 24h"
     elif hours_ago <= 48:
-        return "#FF7F00", "< 48h", "24h à 48h", True
+        return "#FF7F00", "< 48h", "24h à 48h"
     elif hours_ago <= 72:
-        return "#FFB84D", "< 72h", "48h à 72h", True
+        return "#FFB84D", "< 72h", "48h à 72h"
     else:
-        return "#FFE082", "> 72h", "Plus de 72h", False  # Marqué comme ancien
+        return "#FFE082", "> 72h", "Plus de 72h"
 
 # ==========================================
-# RÉCUPÉRATION DE TOUTES LES SOURCES SATELLITES (NASA FIRMS)
+# RÉCUPÉRATION DES DONNÉES (NASA FIRMS)
 # ==========================================
 @st.cache_data(ttl=1800)
 def fetch_all_fires_data():
@@ -110,12 +105,12 @@ def main():
     df_fires = fetch_all_fires_data()
     now_utc = datetime.datetime.utcnow()
 
-    # Indicateurs d'en-tête
+    # En-tête
     col1, col2 = st.columns(2)
     col1.metric("🔥 Total foyers détectés (7 jours)", len(df_fires) if not df_fires.empty else 0)
     col2.metric("⏱️ Dernière actualisation", datetime.datetime.now().strftime("%H:%M:%S"))
 
-    # LÉGENDE CORRIGÉE (TEXTE BLANC SUR FOND SOMBRE RENDERÉ PROPREMENT)
+    # LÉGENDE DE RÉCENCE
     st.markdown("""
     <div style="background-color: #262730; padding: 12px; border-radius: 8px; margin-bottom: 12px; border: 1px solid #444; color: #FFFFFF;">
         <span style="font-weight: bold; margin-right: 15px; color: #FFFFFF;">🎨 Récence des détections :</span>
@@ -123,138 +118,102 @@ def main():
         <span style="margin-right: 15px; font-size: 14px; color: #FFFFFF;"><span style="color:#FF0000;">🔴</span> <b style="color: #FFFFFF;">12h à 24h</b></span>
         <span style="margin-right: 15px; font-size: 14px; color: #FFFFFF;"><span style="color:#FF7F00;">🟠</span> <b style="color: #FFFFFF;">24h à 48h</b></span>
         <span style="margin-right: 15px; font-size: 14px; color: #FFFFFF;"><span style="color:#FFB84D;">🟡</span> <b style="color: #FFFFFF;">48h à 72h</b></span>
-        <span style="margin-right: 15px; font-size: 14px; color: #FFFFFF;"><span style="color:#FFE082;">⚪</span> <b style="color: #FFFFFF;">&gt; 72h (Zone diffuse)</b></span>
+        <span style="margin-right: 15px; font-size: 14px; color: #FFFFFF;"><span style="color:#FFE082;">⚪</span> <b style="color: #FFFFFF;">&gt; 72h (Zone jaune diffuse)</b></span>
     </div>
     """, unsafe_allow_html=True)
 
     current_zoom = st.session_state.get("last_zoom", 5)
-    current_bounds = st.session_state.get("last_bounds", None)
 
-    # Carte centrée sur les Pyrénées
+    # Initialisation carte
     m = folium.Map(location=[43.0, 1.5], zoom_start=current_zoom, tiles=None)
 
-    folium.TileLayer(
-        tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-        attr="Esri World Imagery",
-        name="🛰️ Satellite HD (Esri)",
-        overlay=False
-    ).add_to(m)
+    # Fonds de carte
+    folium.TileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", attr="Esri", name="🛰️ Satellite HD", overlay=False).add_to(m)
+    folium.TileLayer("https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png", attr="OpenTopoMap", name="🌲 Relief & Végétation", overlay=False).add_to(m)
+    folium.TileLayer("OpenStreetMap", name="🗺️ Carte Routière", overlay=False).add_to(m)
 
-    folium.TileLayer(
-        tiles="https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png",
-        attr="OpenTopoMap",
-        name="🌲 Relief & Végétation",
-        overlay=False
-    ).add_to(m)
-
-    folium.TileLayer(
-        tiles="OpenStreetMap",
-        name="🗺️ Carte Routière",
-        overlay=False
-    ).add_to(m)
-
-    # SEUIL DE ZOOM ÉLEVÉ POUR ÉVITER TOUT PLANTAGE (Niveau local / commune)
-    ZOOM_THRESHOLD = 10 
+    ZOOM_MIN_FOR_POINTS = 9
 
     if not df_fires.empty:
-        if current_zoom < ZOOM_THRESHOLD:
-            # 1. VUE MACRO (< ZOOM 10) : Carte de densité globale
-            st.info("🗺️ **Vue d'ensemble** : Densité globale affichée. Zoomez fortement sur une zone précise (zoom ≥ 10) pour voir les foyers exacts.")
-            
-            # Échantillonnage léger pour garantir 60 FPS lors du pan/zoom
-            sample_df = df_fires if len(df_fires) < 10000 else df_fires.sample(10000, random_state=42)
-            heat_data = sample_df[['latitude', 'longitude']].values.tolist()
-            
+        # 1. COUCHE HEATMAP (DENSITÉ) : Toujours activable/désactivable dans le menu
+        heat_group = folium.FeatureGroup(name="🔥 Heatmap (Densité globale)", show=True)
+        sample_heat = df_fires[['latitude', 'longitude']].values.tolist()
+        HeatMap(
+            sample_heat,
+            radius=10,
+            blur=8,
+            min_opacity=0.35,
+            gradient={0.2: '#FFE082', 0.5: '#FF7F00', 0.8: '#FF0000', 1.0: '#8B0000'}
+        ).add_to(heat_group)
+        heat_group.add_to(m)
+
+        # 2. COUCHE POINTS PRÉCIS (Séparation Récent / Ancien)
+        hours_ago_series = (now_utc - df_fires['datetime']).dt.total_seconds() / 3600.0
+        df_recent = df_fires[hours_ago_series <= 72]
+        df_old = df_fires[hours_ago_series > 72]
+
+        # Voile jaune fluide pour les points anciens > 72h (toujours actif avec les points)
+        if not df_old.empty:
+            old_group = folium.FeatureGroup(name="🟡 Zones anciennes (> 72h)", show=True)
             HeatMap(
-                heat_data,
-                radius=10,
-                blur=8,
-                min_opacity=0.35,
-                gradient={0.2: '#FFE082', 0.5: '#FF7F00', 0.8: '#FF0000', 1.0: '#8B0000'}
-            ).add_to(m)
+                df_old[['latitude', 'longitude']].values.tolist(),
+                radius=14,
+                blur=10,
+                min_opacity=0.25,
+                gradient={0.4: '#FFE082', 1.0: '#FFD54F'}
+            ).add_to(old_group)
+            old_group.add_to(m)
 
-        else:
-            # 2. VUE ZOOMÉE (≥ ZOOM 10) : Extraction stricte de l'emprise visible
-            st.success(f"📍 **Zoom local ({current_zoom})** : Affichage des foyers actifs sur la zone visible.")
+        # Couche Points Précis (Activable seulement si zoom suffisant)
+        if current_zoom >= ZOOM_MIN_FOR_POINTS:
+            st.success(f"📍 Zoom suffisant ({current_zoom}) : La couche 'Points précis (<= 72h)' est disponible dans le menu.")
+            points_group = folium.FeatureGroup(name="📍 Points précis (<= 72h)", show=True)
             
-            df_visible = df_fires
-            if current_bounds:
-                try:
-                    sw = current_bounds['_southWest']
-                    ne = current_bounds['_northEast']
-                    df_visible = df_fires[
-                        (df_fires['latitude'] >= sw['lat']) & (df_fires['latitude'] <= ne['lat']) &
-                        (df_fires['longitude'] >= sw['lng']) & (df_fires['longitude'] <= ne['lng'])
-                    ]
-                except Exception:
-                    df_visible = df_fires
-
-            if not df_visible.empty:
-                # Séparation des points : Récents (<=72h) vs Anciens (>72h)
-                hours_ago_series = (now_utc - df_visible['datetime']).dt.total_seconds() / 3600.0
+            # Limite de sécurité simple sans calcul complexe de Bounding Box
+            for _, row in df_recent.iterrows():
+                color, label_age, age_desc = get_recency_info(row['datetime'], now_utc)
                 
-                df_recent = df_visible[hours_ago_series <= 72]
-                df_old = df_visible[hours_ago_series > 72]
+                popup_html = f"""
+                <div style="font-family: Arial; font-size: 12px; min-width: 150px;">
+                    <b style="color:{color};">🔥 Foyer ({label_age})</b><br><br>
+                    <b>Ancienneté :</b> {age_desc}<br>
+                    <b>Date UTC :</b> {row['datetime_str']}<br>
+                    <b>Coordonnées :</b> {row['latitude']:.4f}, {row['longitude']:.4f}
+                </div>
+                """
+                
+                folium.CircleMarker(
+                    location=[row['latitude'], row['longitude']],
+                    radius=4,
+                    color="#000000",
+                    weight=0.5,
+                    fill=True,
+                    fill_color=color,
+                    fill_opacity=0.9,
+                    popup=folium.Popup(popup_html, max_width=220),
+                    tooltip=f"Feu {label_age}"
+                ).add_to(points_group)
+                
+            points_group.add_to(m)
+        else:
+            st.warning(f"🔍 Zoom actuel ({current_zoom}) : Zoomez davantage (zoom ≥ {ZOOM_MIN_FOR_POINTS}) pour pouvoir cocher les 'Points précis'.")
 
-                # A) Les points de plus de 72h sont affichés sous forme de voile jaune (Heatmap très douce)
-                # Cela évite de créer des milliers de marqueurs individuels inutiles
-                if not df_old.empty:
-                    old_heat_data = df_old[['latitude', 'longitude']].values.tolist()
-                    HeatMap(
-                        old_heat_data,
-                        radius=15,
-                        blur=12,
-                        min_opacity=0.25,
-                        gradient={0.4: '#FFE082', 1.0: '#FFD54F'}
-                    ).add_to(m)
-
-                # B) Seuls les points récents (<= 72h) sont créés sous forme de CircleMarker
-                # On limite strictement à 500 marqueurs max pour prémunir tout plantage du navigateur
-                if len(df_recent) > 500:
-                    df_recent = df_recent.sort_values(by='datetime', ascending=False).head(500)
-
-                for _, row in df_recent.iterrows():
-                    color, label_age, age_desc, _ = get_recency_info(row['datetime'], now_utc)
-                    
-                    popup_html = f"""
-                    <div style="font-family: Arial; font-size: 12px; min-width: 150px;">
-                        <b style="color:{color};">🔥 Foyer ({label_age})</b><br><br>
-                        <b>Ancienneté :</b> {age_desc}<br>
-                        <b>Date UTC :</b> {row['datetime_str']}<br>
-                        <b>Coordonnées :</b> {row['latitude']:.4f}, {row['longitude']:.4f}
-                    </div>
-                    """
-                    
-                    folium.CircleMarker(
-                        location=[row['latitude'], row['longitude']],
-                        radius=4,
-                        color="#000000",
-                        weight=0.5,
-                        fill=True,
-                        fill_color=color,
-                        fill_opacity=0.9,
-                        popup=folium.Popup(popup_html, max_width=220),
-                        tooltip=f"Feu {label_age} ({row['datetime_str']})"
-                    ).add_to(m)
-
+    # Contrôle unique des couches
     folium.LayerControl(collapsed=False).add_to(m)
 
-    # Capture réactive du zoom et des limites
+    # Affichage Folium simple (sans boucle de rechargement bounds)
     map_output = st_folium(
         m, 
         width="100%", 
         height=720, 
         key="main_fire_map",
-        returned_objects=["zoom", "bounds"]
+        returned_objects=["zoom"]
     )
 
-    if map_output and "zoom" in map_output and map_output["zoom"] is not None:
-        new_zoom = map_output["zoom"]
-        new_bounds = map_output.get("bounds")
-        
-        if new_zoom != st.session_state.get("last_zoom") or new_bounds != st.session_state.get("last_bounds"):
-            st.session_state["last_zoom"] = new_zoom
-            st.session_state["last_bounds"] = new_bounds
+    # Seul le zoom est stocké pour débloquer/bloquer l'option dans le menu
+    if map_output and map_output.get("zoom") is not None:
+        if map_output["zoom"] != st.session_state.get("last_zoom"):
+            st.session_state["last_zoom"] = map_output["zoom"]
             st.rerun()
 
 if __name__ == "__main__":
